@@ -1,41 +1,19 @@
 import React from "react";
-import { useLineContext, ParentInfoV2 } from "./context";
+import { useLineContext, ParentInfoV2, NodeCallbacks } from "./context";
 import * as objects from "../../../src/language_objects/cNodes";
 import "./index.css";
 import { childInfo } from "./childInfo";
-
-export function ModeIndicator() {
-  const { mode } = useLineContext();
-  return (
-    <div
-      style={{
-        position: "fixed",
-        top: "10px",
-        right: "10px",
-        padding: "5px 10px",
-        backgroundColor:
-          mode === "view"
-            ? "var(--vscode-editorInfo-background)"
-            : "var(--vscode-editorWarning-background)",
-        color:
-          mode === "view"
-            ? "var(--vscode-editorInfo-foreground)"
-            : "var(--vscode-editorWarning-foreground)",
-        border:
-          "1px solid " +
-          (mode === "view"
-            ? "var(--vscode-editorInfo-border)"
-            : "var(--vscode-editorWarning-border)"),
-        borderRadius: "3px",
-        fontSize: "12px",
-        fontWeight: "bold",
-        zIndex: 1000,
-      }}
-    >
-      MODE: {mode.toUpperCase()}
-    </div>
-  );
-}
+import { createKeyDownHandler } from "../lib/keyBinds";
+import {
+  createArrayFieldCallbacks,
+  createOptionalFieldCallbacks,
+  insertUnknownIntoField,
+  prependUnknownToArray,
+  createRequiredFieldCallbacks,
+  createParameter,
+  appendToArray,
+  createUnknown,
+} from "../lib/editionHelpers";
 
 interface EditableFieldProps<T extends objects.LanguageObject, K extends string & keyof T> {
   node: T;
@@ -60,7 +38,6 @@ function EditableField<T extends objects.LanguageObject, K extends string & keyo
     focusRequest,
     clearFocusRequest,
     mode,
-    setMode,
   } = useLineContext();
   const isSelected = selectedNodeId === node.id && selectedKey && selectedKey === key;
   const [inputValue, setInputValue] = React.useState(String(node[key] ?? ""));
@@ -79,6 +56,7 @@ function EditableField<T extends objects.LanguageObject, K extends string & keyo
       focusRequest.fieldKey === key &&
       !hasFocusedRef.current
     ) {
+      console.log("Focusing input for node:", node.id, " key:", key);
       if (inputRef.current) {
         inputRef.current.focus();
         inputRef.current.select();
@@ -92,16 +70,6 @@ function EditableField<T extends objects.LanguageObject, K extends string & keyo
       hasFocusedRef.current = false;
     }
   }, [focusRequest, node.id, key, clearFocusRequest]);
-
-  const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
-    if (e.key === "i" && mode === "view") {
-      e.preventDefault();
-      setMode("edit");
-    } else if (e.key === "Escape" && mode === "edit") {
-      e.preventDefault();
-      setMode("view");
-    }
-  };
 
   // width in ch units, at least 1ch
   const width = Math.max(1, inputValue.length) + "ch";
@@ -121,7 +89,6 @@ function EditableField<T extends objects.LanguageObject, K extends string & keyo
       }}
       value={inputValue}
       onChange={(e) => setInputValue(e.target.value)}
-      onKeyDown={handleKeyDown}
       onFocus={() => {
         setSelectedKey(key);
         setSelectedNodeId(node.id);
@@ -138,139 +105,33 @@ function EditableField<T extends objects.LanguageObject, K extends string & keyo
 
 interface ObjectProps {
   node: objects.LanguageObject;
+  parentInfo: ParentInfoV2;
   children: React.ReactNode;
   display?: "inline" | "block";
+  callbacks?: NodeCallbacks;
 }
 
-export function Object({ node, children, display = "block" }: ObjectProps) {
-  const { selectedNodeId, setSelectedNodeId, onEdit, nodeMap, parentMap, requestFocus, mode } =
+export function Object({ node, parentInfo, children, display = "block", callbacks }: ObjectProps) {
+  const { selectedNodeId, setSelectedNodeId, setParentNodeInfo, setSelectedKey, mode } =
     useLineContext();
   const isSelected = selectedNodeId === node.id;
 
-  const handleKeyDown = (e: React.KeyboardEvent) => {
-    if (!isSelected) {
-      return;
-    }
-
-    // Only allow inserting unknown nodes in view mode for block elements
-    if (e.key === "Enter" && mode === "view") {
-      e.preventDefault();
-      insertUnknown();
-    } else if (e.key === "Delete" && mode === "view") {
-      e.preventDefault();
-      deleteNode();
-    }
-  };
-
-  const deleteNode = () => {
-    console.log("Deleting node:", node);
-    const parentInfo = parentMap.get(node.id);
-    if (!parentInfo) {
-      return;
-    }
-    const { parent, key, index } = parentInfo;
-    if (!parent || !(key in parent)) {
-      return;
-    }
-
-    // Check if it's an array field
-    const field = parent[key];
-    if (Array.isArray(field)) {
-      console.log("Parent field is an array, removing from array");
-      // Remove the node from the array
-      const newArray = [...field.slice(0, index), ...field.slice(index + 1)];
-
-      (parent as any)[key] = newArray;
-
-      // Remove from maps
-      nodeMap.delete(node.id);
-      parentMap.delete(node.id);
-
-      // Update parent indices for nodes that came after this one
-      for (let i = 0; i < newArray.length - index; i++) {
-        const siblingNode = newArray[index + i];
-        if (siblingNode && typeof siblingNode === "object" && "id" in siblingNode) {
-          parentMap.set((siblingNode as objects.LanguageObject).id, {
-            parent,
-            key,
-            index: index + i,
-          } as ParentInfoV2);
+  const handleKeyDown = createKeyDownHandler(mode, {
+    view: {
+      insertSibling: () => {
+        if (isSelected && callbacks?.onInsertSibling) {
+          console.log("Object: Inserting sibling for", node.type);
+          callbacks.onInsertSibling(node);
         }
-      }
-
-      onEdit(parent, key);
-      console.log(
-        "Deleted node:",
-        node.id,
-        " from parent:",
-        parent,
-        " at key:",
-        key,
-        " index:",
-        index
-      );
-    } else if (typeof field === "object") {
-      console.log("Parent field is single-valued, setting to null");
-
-      (parent as any)[key] = null;
-      nodeMap.delete(node.id);
-      parentMap.delete(node.id);
-      onEdit(parent, key);
-      console.log("Deleted node:", node.id, " from parent:", parent, " at key:", key);
-    } else {
-      console.error("Parent field is neither array nor object, cannot delete");
-    }
-  };
-
-  const insertUnknown = () => {
-    const newObject: objects.Unknown = {
-      id: crypto.randomUUID(),
-      type: "unknown",
-      content: "",
-    };
-    // insert logic: e.g., in CompoundStatement
-    const parentInfo = parentMap.get(node.id);
-    if (!parentInfo) {
-      return;
-    }
-    const { parent, key, index } = parentInfo;
-    if (!parent || !(key in parent)) {
-      return;
-    }
-
-    // Now TypeScript knows key is valid for parent!
-    // We need to check if it's an array field
-    const field = parent[key];
-    if (!Array.isArray(field)) {
-      return;
-    }
-
-    const newArray = [...field.slice(0, index + 1), newObject, ...field.slice(index + 1)];
-
-    (parent as any)[key] = newArray; // Runtime assignment - type safety maintained by ParentInfoV2
-
-    nodeMap.set(newObject.id, newObject);
-    parentMap.set(newObject.id, {
-      parent,
-      key,
-      index: index + 1,
-    } as ParentInfoV2);
-
-    onEdit(parent, key);
-    console.log(
-      "Inserted new unknown node:",
-      newObject,
-      " in parent:",
-      parent,
-      " at key:",
-      key,
-      " index:",
-      index
-    );
-
-    // Request focus on the new node's content field - React will handle it when rendered
-    requestFocus(newObject.id, "content");
-  };
+      },
+      delete: () => {
+        if (isSelected && callbacks?.onDelete) {
+          console.log("Object: Deleting", node.type);
+          callbacks.onDelete(node);
+        }
+      },
+    },
+  });
 
   const Element = display === "inline" ? "span" : "div";
 
@@ -280,11 +141,16 @@ export function Object({ node, children, display = "block" }: ObjectProps) {
       className={`object-container object-container-${display} ${
         isSelected ? "object-selected" : ""
       }`}
+      onFocus={(e) => {
+        e.stopPropagation();
+        setSelectedNodeId(node.id);
+        setSelectedKey(parentInfo.key);
+        setParentNodeInfo(parentInfo);
+      }}
       onClick={(e) => {
         e.stopPropagation();
         setSelectedNodeId(node.id);
       }}
-      tabIndex={0}
     >
       {children}
     </Element>
@@ -294,119 +160,77 @@ export function Object({ node, children, display = "block" }: ObjectProps) {
 interface NodeRenderProps {
   node: objects.LanguageObject;
   parentInfo: ParentInfoV2;
+  callbacks?: NodeCallbacks;
+  display?: "inline" | "block";
 }
 
-export function NodeRender({ node, parentInfo }: NodeRenderProps): React.ReactNode {
-  //console.log(node.type);
+interface XRenderProps<T extends objects.LanguageObject> extends NodeRenderProps {
+  node: T;
+}
 
-  switch (node.type) {
+export function NodeRender(props: NodeRenderProps): React.ReactNode {
+  switch (props.node.type) {
     case "preprocInclude":
-      return (
-        <PreprocIncludeRender
-          includeDecl={node as objects.PreprocInclude}
-          parentInfo={parentInfo}
-        />
-      );
+      return <PreprocIncludeRender {...(props as XRenderProps<objects.PreprocInclude>)} />;
     case "functionParameter":
-      return (
-        <FunctionParameterRender
-          paramDecl={node as objects.FunctionParameter}
-          parentInfo={parentInfo}
-        />
-      );
+      return <FunctionParameterRender {...(props as XRenderProps<objects.FunctionParameter>)} />;
     case "functionDeclaration":
       return (
-        <FunctionDeclarationRender
-          functionDeclaration={node as objects.FunctionDeclaration}
-          parentInfo={parentInfo}
-        />
+        <FunctionDeclarationRender {...(props as XRenderProps<objects.FunctionDeclaration>)} />
       );
     case "functionDefinition":
-      return (
-        <FunctionDefinitionRender
-          funcDef={node as objects.FunctionDefinition}
-          parentInfo={parentInfo}
-        />
-      );
+      return <FunctionDefinitionRender {...(props as XRenderProps<objects.FunctionDefinition>)} />;
     case "declaration":
-      return <DeclarationRender varDecl={node as objects.Declaration} parentInfo={parentInfo} />;
+      return <DeclarationRender {...(props as XRenderProps<objects.Declaration>)} />;
     case "returnStatement":
-      return (
-        <ReturnStatementRender
-          returnStmt={node as objects.ReturnStatement}
-          parentInfo={parentInfo}
-        />
-      );
+      return <ReturnStatementRender {...(props as XRenderProps<objects.ReturnStatement>)} />;
     case "compoundStatement":
-      return (
-        <CompoundStatementRender
-          compoundStatement={node as objects.CompoundStatement}
-          parentInfo={parentInfo}
-        />
-      );
+      return <CompoundStatementRender {...(props as XRenderProps<objects.CompoundStatement>)} />;
     case "callExpression":
-      return (
-        <CallExpressionRender callExpr={node as objects.CallExpression} parentInfo={parentInfo} />
-      );
+      return <CallExpressionRender {...(props as XRenderProps<objects.CallExpression>)} />;
     case "reference":
-      return <ReferenceRender reference={node as objects.Reference} parentInfo={parentInfo} />;
+      return <ReferenceRender {...(props as XRenderProps<objects.Reference>)} />;
     case "assignmentExpression":
       return (
-        <AssignmentExpressionRender
-          assignmentExpr={node as objects.AssignmentExpression}
-          parentInfo={parentInfo}
-        />
+        <AssignmentExpressionRender {...(props as XRenderProps<objects.AssignmentExpression>)} />
       );
     case "numberLiteral":
-      return (
-        <NumberLiteralRender literalExpr={node as objects.NumberLiteral} parentInfo={parentInfo} />
-      );
+      return <NumberLiteralRender {...(props as XRenderProps<objects.NumberLiteral>)} />;
     case "stringLiteral":
-      return (
-        <StringLiteralRender literalExpr={node as objects.StringLiteral} parentInfo={parentInfo} />
-      );
+      return <StringLiteralRender {...(props as XRenderProps<objects.StringLiteral>)} />;
     case "binaryExpression":
-      return (
-        <BinaryExpressionRender
-          binaryExpression={node as objects.BinaryExpression}
-          parentInfo={parentInfo}
-        />
-      );
+      return <BinaryExpressionRender {...(props as XRenderProps<objects.BinaryExpression>)} />;
     case "ifStatement":
-      return <IfStatementRender ifStatement={node as objects.IfStatement} />;
+      return <IfStatementRender {...(props as XRenderProps<objects.IfStatement>)} />;
+    case "elseClause":
+      return <ElseClauseRender {...(props as XRenderProps<objects.ElseClause>)} />;
     case "unknown":
-      return <UnknownRender unknown={node as objects.Unknown} parentInfo={parentInfo} />;
+      return <UnknownRender {...(props as XRenderProps<objects.Unknown>)} />;
+    case "comment":
+      return <CommentRender {...(props as XRenderProps<objects.Comment>)} />;
     default:
       return "WIP";
   }
 }
 
-function UnknownRender({
-  unknown,
-  parentInfo,
-}: {
-  unknown: objects.Unknown;
-  parentInfo: ParentInfoV2;
-}): React.ReactNode {
+function UnknownRender(props: XRenderProps<objects.Unknown>): React.ReactNode {
   const { mode, onRequestAvailableInserts, availableInserts, onEdit } = useLineContext();
   const [showDropdown, setShowDropdown] = React.useState(false);
   const dropdownRef = React.useRef<HTMLSelectElement>(null);
 
   // When in edit mode and Enter is pressed, request available inserts
-  const handleKeyDown = (e: React.KeyboardEvent) => {
-    if (e.key === "Enter" && mode === "edit") {
-      e.preventDefault();
-      console.log("Requesting available inserts for unknown node:", unknown);
-      // Get parent info from the map
-      const parent = parentInfo.parent;
-      const key = parentInfo.key;
-      onRequestAvailableInserts(parent.id, key);
-      setShowDropdown(true);
-    } else if (e.key === "Escape" && showDropdown) {
-      e.preventDefault();
-      setShowDropdown(false);
-    }
-  };
+  const handleKeyDown = createKeyDownHandler(mode, {
+    edit: {
+      insert: () => {
+        console.log("UnknownRender: Requesting available inserts");
+        // Get parent info from the map
+        const parent = props.parentInfo.parent;
+        const key = props.parentInfo.key;
+        onRequestAvailableInserts(parent.id, key);
+        setShowDropdown(true);
+      },
+    },
+  });
 
   // Focus the dropdown when it appears and options are loaded
   React.useEffect(() => {
@@ -426,9 +250,9 @@ function UnknownRender({
       const selectedOption = availableInserts[selectedIndex];
 
       // Replace the unknown node with the selected option
-      const parent = parentInfo.parent;
-      const key = parentInfo.key;
-      const index = parentInfo.index;
+      const parent = props.parentInfo.parent;
+      const key = props.parentInfo.key;
+      const index = props.parentInfo.index;
       console.log("Parent before insert:", parent, " key:", key, " index:", index);
       console.log("Selected option to insert:", selectedOption);
 
@@ -438,6 +262,7 @@ function UnknownRender({
         const newArray = [...field];
         newArray[index] = selectedOption;
 
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
         (parent as any)[key] = newArray;
         console.log("Parent after insert:", parent);
         // Notify of the edit
@@ -445,6 +270,7 @@ function UnknownRender({
       } else if (typeof parent[key] === "object") {
         console.log("Parent field is single-valued, replacing directly");
 
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
         (parent as any)[key] = selectedOption;
         console.log("Parent after insert:", parent);
         onEdit(parent, key);
@@ -462,6 +288,7 @@ function UnknownRender({
       e.stopPropagation();
       commitSelection();
     } else if (e.key === "Escape") {
+      e.stopPropagation();
       e.preventDefault();
       setShowDropdown(false);
     }
@@ -472,9 +299,9 @@ function UnknownRender({
     commitSelection();
   };
 
-  return (
+  const content = (
     <span onKeyDown={handleKeyDown}>
-      {EditableField({ node: unknown, key: "content", parentInfo })}
+      {EditableField({ node: props.node, key: "content", parentInfo: props.parentInfo })}
       {showDropdown && availableInserts && availableInserts.length > 0 && (
         <select
           ref={dropdownRef}
@@ -500,192 +327,331 @@ function UnknownRender({
       )}
     </span>
   );
+
+  return <Object {...props}>{content}</Object>;
 }
 
 function PreprocIncludeRender({
-  includeDecl,
+  node,
   parentInfo,
-}: {
-  includeDecl: objects.PreprocInclude;
-  parentInfo: ParentInfoV2;
-}): React.ReactNode {
-  return (
+  callbacks,
+  display = "block",
+}: XRenderProps<objects.PreprocInclude>): React.ReactNode {
+  const content = (
     <>
       <span className="token-keyword">#include</span>{" "}
       {EditableField({
-        node: includeDecl,
+        node,
         key: "content",
         parentInfo,
         className: "token-string",
       })}
     </>
   );
-}
-
-function FunctionDeclarationRender({
-  functionDeclaration,
-  parentInfo,
-}: {
-  functionDeclaration: objects.FunctionDeclaration;
-  parentInfo: ParentInfoV2;
-}): React.ReactNode {
-  const { nodeMap } = useLineContext();
-  nodeMap.set(functionDeclaration.id, functionDeclaration);
 
   return (
-    <>
+    <Object node={node} parentInfo={parentInfo} callbacks={callbacks} display={display}>
+      {content}
+    </Object>
+  );
+}
+
+function FunctionDeclarationRender(
+  props: XRenderProps<objects.FunctionDeclaration>
+): React.ReactNode {
+  const { nodeMap, onEdit, requestFocus, mode, selectedNodeId } = useLineContext();
+  nodeMap.set(props.node.id, props.node);
+
+  const handleKeyDown = createKeyDownHandler(mode, {
+    edit: {
+      insert: () => {
+        if (selectedNodeId === props.node.id) {
+          console.log("FunctionDeclarationRender: Appending parameter");
+          appendToArray(
+            props.node,
+            "parameterList",
+            createParameter,
+            nodeMap,
+            onEdit,
+            requestFocus
+          );
+        }
+      },
+    },
+  });
+
+  const content = (
+    <span onKeyDown={handleKeyDown}>
       {EditableField({
-        node: functionDeclaration,
+        node: props.node,
         key: "returnType",
-        parentInfo,
+        parentInfo: props.parentInfo,
         className: "token-type",
       })}
       {EditableField({
-        node: functionDeclaration,
+        node: props.node,
         key: "identifier",
-        parentInfo,
+        parentInfo: props.parentInfo,
         className: "token-function",
       })}
       <span className="token-delimiter">{"("}</span>
 
-      {functionDeclaration.parameterList.map((param, i) => (
+      {props.node.parameterList.map((param, i) => (
         <React.Fragment key={param.id}>
           {i > 0 && ", "}
-          <FunctionParameterRender
-            paramDecl={param}
-            parentInfo={childInfo(functionDeclaration, "parameterList", i)}
+          <NodeRender
+            node={param}
+            parentInfo={childInfo(props.node, "parameterList", i)}
+            callbacks={createArrayFieldCallbacks(
+              props.node,
+              "parameterList",
+              i,
+              createParameter,
+              nodeMap,
+              onEdit,
+              requestFocus
+            )}
+            display="inline"
           />
         </React.Fragment>
       ))}
       <span className="token-delimiter">{")"}</span>
-    </>
+    </span>
   );
+
+  return <Object {...props}>{content}</Object>;
 }
 
-function FunctionDefinitionRender({
-  funcDef,
-  parentInfo,
-}: {
-  funcDef: objects.FunctionDefinition;
-  parentInfo: ParentInfoV2;
-}): React.ReactNode {
-  const { nodeMap } = useLineContext();
-  nodeMap.set(funcDef.id, funcDef);
+function FunctionDefinitionRender(
+  props: XRenderProps<objects.FunctionDefinition>
+): React.ReactNode {
+  const { nodeMap, onEdit, requestFocus, mode, selectedNodeId } = useLineContext();
+  nodeMap.set(props.node.id, props.node);
 
-  return (
-    <>
+  const handleKeyDown = createKeyDownHandler(mode, {
+    edit: {
+      insert: () => {
+        if (selectedNodeId === props.node.id) {
+          console.log("FunctionDefinitionRender: Appending parameter");
+          appendToArray(
+            props.node,
+            "parameterList",
+            createParameter,
+            nodeMap,
+            onEdit,
+            requestFocus
+          );
+        }
+      },
+    },
+  });
+
+  // TODO why not Object?
+  const content = (
+    <span onKeyDown={handleKeyDown}>
       {EditableField({
-        node: funcDef,
+        node: props.node,
         key: "returnType",
-        parentInfo,
+        parentInfo: props.parentInfo,
         className: "token-type",
       })}{" "}
-      {EditableField({ node: funcDef, key: "identifier", parentInfo, className: "token-function" })}
+      {EditableField({
+        node: props.node,
+        key: "identifier",
+        parentInfo: props.parentInfo,
+        className: "token-function",
+      })}
       <span className="token-delimiter">{"("}</span>
-      {funcDef.parameterList.map((param, i) => (
+      {props.node.parameterList.map((param, i) => (
         <React.Fragment key={param.id}>
           {i > 0 && ", "}
-          <FunctionParameterRender
-            paramDecl={param}
-            parentInfo={childInfo(funcDef, "parameterList", i)}
+          <NodeRender
+            node={param}
+            parentInfo={childInfo(props.node, "parameterList", i)}
+            display="inline"
+            callbacks={createArrayFieldCallbacks(
+              props.node,
+              "parameterList",
+              i,
+              createParameter,
+              nodeMap,
+              onEdit,
+              requestFocus
+            )}
           />
         </React.Fragment>
       ))}
       <span className="token-delimiter">{")"}</span>
-      {funcDef.compoundStatement && (
-        <CompoundStatementRender
-          compoundStatement={funcDef.compoundStatement}
-          parentInfo={childInfo(funcDef, "compoundStatement")}
+      {props.node.compoundStatement && (
+        <NodeRender
+          node={props.node.compoundStatement}
+          parentInfo={childInfo(props.node, "compoundStatement")}
+          callbacks={createOptionalFieldCallbacks(props.node, "compoundStatement", nodeMap, onEdit)}
         />
       )}
-    </>
+    </span>
   );
+
+  return <Object {...props}>{content}</Object>;
 }
 
-function DeclarationRender({
-  varDecl,
-  parentInfo,
-}: {
-  varDecl: objects.Declaration;
-  parentInfo: ParentInfoV2;
-}): React.ReactNode {
-  const { nodeMap, onEdit, mode } = useLineContext();
-  nodeMap.set(varDecl.id, varDecl);
+function DeclarationRender(props: XRenderProps<objects.Declaration>): React.ReactNode {
+  const { nodeMap, onEdit, mode, requestFocus } = useLineContext();
+  nodeMap.set(props.node.id, props.node);
 
-  const handleKeyDown = (e: React.KeyboardEvent) => {
-    if (mode !== "edit") {
-      return;
-    }
+  const handleKeyDown = createKeyDownHandler(mode, {
+    edit: {
+      insert: () => {
+        if (!props.node.value) {
+          console.log("DeclarationRender: Inserting unknown node as value");
+          insertUnknownIntoField(props.node, "value", nodeMap, onEdit, requestFocus);
+        }
+      },
+    },
+  });
 
-    if (e.key === "Enter" && !varDecl.value) {
-      e.preventDefault();
-      // Insert an unknown node as the value
-      const newUnknown: objects.Unknown = {
-        id: crypto.randomUUID(),
-        type: "unknown",
-        content: "",
-      };
-      varDecl.value = newUnknown;
-      nodeMap.set(newUnknown.id, newUnknown);
-      onEdit(varDecl, null);
-      console.log("Inserted unknown node as value for declaration:", varDecl.id);
-    }
-  };
-
-  return (
+  const content = (
     <span onKeyDown={handleKeyDown}>
-      {EditableField({ node: varDecl, key: "primitiveType", parentInfo, className: "token-type" })}{" "}
-      {EditableField({ node: varDecl, key: "identifier", parentInfo, className: "token-variable" })}
-      {varDecl.value && (
+      {EditableField({
+        node: props.node,
+        key: "primitiveType",
+        parentInfo: props.parentInfo,
+        className: "token-type",
+      })}{" "}
+      {EditableField({
+        node: props.node,
+        key: "identifier",
+        parentInfo: props.parentInfo,
+        className: "token-variable",
+      })}
+      {props.node.value && (
         <>
           {" "}
           {"="}{" "}
-          <Object node={varDecl.value} display="inline">
-            <NodeRender node={varDecl.value} parentInfo={childInfo(varDecl, "value")} />
-          </Object>
+          <NodeRender
+            node={props.node.value}
+            display="inline"
+            parentInfo={childInfo(props.node, "value")}
+            callbacks={createOptionalFieldCallbacks(props.node, "value", nodeMap, onEdit)}
+          />
         </>
       )}
       {";"}
     </span>
   );
+
+  return <Object {...props}>{content}</Object>;
 }
 
-function FunctionParameterRender({
-  paramDecl,
-  parentInfo,
-}: {
-  paramDecl: objects.FunctionParameter;
-  parentInfo: ParentInfoV2;
-}): React.ReactNode {
+function FunctionParameterRender(props: XRenderProps<objects.FunctionParameter>): React.ReactNode {
   const { nodeMap } = useLineContext();
-  nodeMap.set(paramDecl.id, paramDecl);
+  nodeMap.set(props.node.id, props.node);
 
-  return (
+  const content = (
     <>
       {EditableField({
-        node: paramDecl,
+        node: props.node,
         key: "paramType",
-        parentInfo,
+        parentInfo: props.parentInfo,
         className: "token-type",
       })}{" "}
       {EditableField({
-        node: paramDecl,
+        node: props.node,
         key: "identifier",
-        parentInfo,
+        parentInfo: props.parentInfo,
         className: "token-variable",
       })}
     </>
   );
+
+  return <Object {...props}>{content}</Object>;
 }
 
-function CompoundStatementRender({
-  compoundStatement: compStmt,
-}: {
-  compoundStatement: objects.CompoundStatement;
-  parentInfo: ParentInfoV2;
-}): React.ReactNode {
-  return (
-    <>
+{
+  /* <div style={{ display: "flex", flexDirection: "column", gap: "1rem" }}>
+              {sourceFile?.code.map((node, i) => (
+                <NodeRender
+                  key={node.id}
+                  node={node}
+                  parentInfo={childInfo(sourceFile, "code", i)}
+                />
+              ))}
+            </div> */
+}
+
+export function SourceFileRender(props: { node: objects.SourceFile }): React.ReactNode {
+  const { onEdit, nodeMap, mode, selectedNodeId, requestFocus } = useLineContext();
+
+  const handleKeyDown = createKeyDownHandler(mode, {
+    edit: {
+      insert: () => {
+        if (selectedNodeId === props.node.id) {
+          console.log("CompoundStatementRender: Inserting unknown node");
+          prependUnknownToArray(props.node, "code", nodeMap, onEdit);
+        }
+      },
+    },
+  });
+
+  const content = (
+    <span onKeyDown={handleKeyDown} tabIndex={0}>
+      {props.node.code.length === 0 ? (
+        <UnknownRender
+          node={{
+            id: crypto.randomUUID(),
+            type: "unknown",
+            content: "",
+          }}
+          parentInfo={childInfo(props.node, "code")}
+        />
+      ) : (
+        <div
+          style={{
+            display: "flex",
+            flexDirection: "column",
+            gap: "1rem",
+          }}
+        >
+          {props.node.code.map((node, i) => (
+            <NodeRender
+              key={node.id}
+              node={node}
+              parentInfo={childInfo(props.node, "code", i)}
+              callbacks={createArrayFieldCallbacks(
+                props.node,
+                "code",
+                i,
+                createUnknown,
+                nodeMap,
+                onEdit,
+                requestFocus
+              )}
+            />
+          ))}
+        </div>
+      )}
+    </span>
+  );
+
+  return content;
+}
+
+function CompoundStatementRender(props: XRenderProps<objects.CompoundStatement>): React.ReactNode {
+  const { onEdit, nodeMap, mode, selectedNodeId, requestFocus } = useLineContext();
+
+  const handleKeyDown = createKeyDownHandler(mode, {
+    edit: {
+      insert: () => {
+        if (selectedNodeId === props.node.id) {
+          console.log("CompoundStatementRender: Inserting unknown node");
+          prependUnknownToArray(props.node, "codeBlock", nodeMap, onEdit);
+        }
+      },
+    },
+  });
+
+  const content = (
+    <span onKeyDown={handleKeyDown} tabIndex={0}>
       <span className="token-delimiter">{"{"}</span>
       <div
         style={{
@@ -694,243 +660,399 @@ function CompoundStatementRender({
           paddingLeft: "20px",
         }}
       >
-        {compStmt.codeBlock.map((node, i) => (
-          <Object key={node.id} node={node}>
-            <NodeRender node={node} parentInfo={childInfo(compStmt, "codeBlock", i)} />
-          </Object>
+        {props.node.codeBlock.map((node, i) => (
+          <NodeRender
+            key={node.id}
+            node={node}
+            parentInfo={childInfo(props.node, "codeBlock", i)}
+            callbacks={createArrayFieldCallbacks(
+              props.node,
+              "codeBlock",
+              i,
+              createUnknown,
+              nodeMap,
+              onEdit,
+              requestFocus
+            )}
+          />
         ))}
       </div>
       <span className="token-delimiter">{"}"}</span>
+    </span>
+  );
+
+  return <Object {...props}>{content}</Object>;
+}
+
+function IfStatementRender(props: XRenderProps<objects.IfStatement>): React.ReactNode {
+  const { mode, onEdit, nodeMap, selectedNodeId } = useLineContext();
+
+  const handleKeyDown = createKeyDownHandler(mode, {
+    edit: {
+      insert: () => {
+        if (selectedNodeId === props.node.id && !props.node.elseStatement) {
+          console.log("IfStatementRender: Inserting else clause");
+          const newElseClause: objects.ElseClause = {
+            id: crypto.randomUUID(),
+            type: "elseClause",
+            body: {
+              id: crypto.randomUUID(),
+              type: "compoundStatement",
+              codeBlock: [],
+            },
+          };
+          props.node.elseStatement = newElseClause;
+          nodeMap.set(newElseClause.id, newElseClause);
+          nodeMap.set(newElseClause.body.id, newElseClause.body);
+          onEdit(props.node, "elseStatement");
+        }
+      },
+    },
+  });
+
+  const elseRender =
+    props.node.elseStatement &&
+    (props.node.elseStatement.type === "elseClause" ? (
+      <NodeRender
+        node={props.node.elseStatement}
+        parentInfo={childInfo(props.node, "elseStatement")}
+        display="inline"
+        callbacks={createOptionalFieldCallbacks(props.node, "elseStatement", nodeMap, onEdit)}
+      />
+    ) : (
+      (() => {
+        const ifStatement = props.node.elseStatement;
+        const elseClauseCallbacks = {
+          onDelete: (node: objects.LanguageObject) => {
+            console.log("Converting if else to else: ", node.id);
+            // Replace the ifStatement with the elseStatement body
+            const newElseClause: objects.ElseClause = {
+              id: crypto.randomUUID(),
+              type: "elseClause",
+              body: ifStatement.body,
+            };
+            props.node.elseStatement = newElseClause;
+            nodeMap.set(newElseClause.id, newElseClause);
+            nodeMap.delete(ifStatement.id);
+            onEdit(props.node, "elseStatement");
+          },
+        };
+        return (
+          <>
+            {" "}
+            <Object
+              display="inline"
+              node={ifStatement}
+              parentInfo={childInfo(props.node, "elseStatement")}
+              callbacks={createOptionalFieldCallbacks(props.node, "elseStatement", nodeMap, onEdit)}
+            >
+              <span className="token-keyword" tabIndex={0}>
+                else
+              </span>
+            </Object>{" "}
+            <NodeRender
+              node={ifStatement}
+              parentInfo={childInfo(props.node, "elseStatement")}
+              display="inline"
+              callbacks={elseClauseCallbacks}
+            />
+          </>
+        );
+      })()
+    ));
+  const content = (
+    <span>
+      <span tabIndex={0} onKeyDown={handleKeyDown}>
+        <span className="token-keyword">if</span> <span className="token-keyword">{"("}</span>
+        <NodeRender
+          node={props.node.condition}
+          parentInfo={childInfo(props.node, "condition")}
+          display="inline"
+        />
+        <span className="token-keyword">{")"}</span>{" "}
+      </span>
+      <NodeRender
+        node={props.node.body}
+        parentInfo={childInfo(props.node, "body")}
+        display="inline"
+      />
+      {elseRender}
+    </span>
+  );
+
+  return <Object {...props}>{content}</Object>;
+}
+
+function ElseClauseRender(props: XRenderProps<objects.ElseClause>): React.ReactNode {
+  // handle enter to convert to ifStatement
+  const { mode, onEdit, nodeMap, selectedNodeId, parentNodeInfo } = useLineContext();
+
+  const handleKeyDown = createKeyDownHandler(mode, {
+    edit: {
+      insert: () => {
+        if (selectedNodeId === props.node.id) {
+          console.log("ElseClauseRender: Converting to ifStatement");
+          // Convert to ifStatement
+          const newIfStatement: objects.IfStatement = {
+            id: crypto.randomUUID(),
+            type: "ifStatement",
+            condition: {
+              id: crypto.randomUUID(),
+              type: "unknown",
+              content: "",
+            },
+            body: props.node.body,
+          };
+          nodeMap.set(newIfStatement.id, newIfStatement);
+          nodeMap.set(newIfStatement.condition.id, newIfStatement.condition);
+
+          if (!parentNodeInfo) {
+            console.error("Parent node info is undefined for else clause:", props.node.id);
+            return;
+          }
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          (parentNodeInfo.parent as any)[parentNodeInfo.key] = newIfStatement;
+          onEdit(parentNodeInfo.parent, parentNodeInfo.key);
+        }
+      },
+    },
+  });
+
+  // Special callback for body - replaces with empty compound statement instead of null
+  const bodyCallbacks: NodeCallbacks = {
+    onDelete: (node: objects.LanguageObject) => {
+      console.log("Deleting else clause body:", node.id);
+      const emptyBody: objects.CompoundStatement = {
+        id: crypto.randomUUID(),
+        type: "compoundStatement",
+        codeBlock: [],
+      };
+      props.node.body = emptyBody;
+      nodeMap.delete(node.id);
+      nodeMap.set(emptyBody.id, emptyBody);
+      onEdit(props.node, "body");
+    },
+  };
+
+  const content = (
+    <>
+      <span className="token-keyword" onKeyDown={handleKeyDown} tabIndex={0}>
+        {" else "}
+      </span>
+      {/* <Object // TODO wrapp in 
+        node={props.node.body}
+        parentInfo={childInfo(props.node, "body")}
+        display="inline"
+        callbacks={bodyCallbacks}
+      > */}
+      <NodeRender
+        node={props.node.body}
+        parentInfo={childInfo(props.node, "body")}
+        display="inline"
+        callbacks={bodyCallbacks}
+      />
+      {/* </Object> */}
     </>
   );
+
+  return <Object {...props}>{content}</Object>;
 }
 
-function IfStatementRender({ ifStatement }: { ifStatement: objects.IfStatement }): React.ReactNode {
-  return (
-    <>
-      <span className="token-keyword">if</span> <span className="token-keyword">{"("}</span>
-      {<NodeRender node={ifStatement.condition} parentInfo={childInfo(ifStatement, "condition")} />}
-      <span className="token-keyword">{")"}</span>{" "}
-      {compoundStatementObjectRender(ifStatement.body, childInfo(ifStatement, "body"))}
-      {ifStatement.elseStatement &&
-        (ifStatement.elseStatement.type === "elseClause" ? (
-          <ElseClauseRender elseClause={ifStatement.elseStatement} />
-        ) : (
-          <IfStatementRender ifStatement={ifStatement.elseStatement} />
-        ))}
-    </>
-  );
-}
+function ReturnStatementRender(props: XRenderProps<objects.ReturnStatement>): React.ReactNode {
+  const { nodeMap, onEdit, mode } = useLineContext();
 
-function compoundStatementObjectRender(
-  compoundStatementObject: objects.CompoundStatementObject,
-  parentInfo: ParentInfoV2
-) {
-  switch (compoundStatementObject.type) {
-    case "compoundStatement":
-      return (
-        <CompoundStatementRender
-          compoundStatement={compoundStatementObject}
-          parentInfo={parentInfo}
-        />
-      );
-    case "declaration":
-      return <DeclarationRender varDecl={compoundStatementObject} parentInfo={parentInfo} />;
-    case "assignmentExpression":
-      return (
-        <AssignmentExpressionRender
-          assignmentExpr={compoundStatementObject}
-          parentInfo={parentInfo}
-        />
-      );
-    case "binaryExpression":
-      return (
-        <BinaryExpressionRender
-          binaryExpression={compoundStatementObject}
-          parentInfo={parentInfo}
-        />
-      );
-    case "callExpression":
-      return <CallExpressionRender callExpr={compoundStatementObject} parentInfo={parentInfo} />;
-    case "ifStatement":
-      return <IfStatementRender ifStatement={compoundStatementObject} />;
-    case "numberLiteral":
-      return <NumberLiteralRender literalExpr={compoundStatementObject} parentInfo={parentInfo} />;
-    case "reference":
-      return <ReferenceRender reference={compoundStatementObject} parentInfo={parentInfo} />;
-    case "stringLiteral":
-      return <StringLiteralRender literalExpr={compoundStatementObject} parentInfo={parentInfo} />;
-    case "returnStatement":
-      return <ReturnStatementRender returnStmt={compoundStatementObject} parentInfo={parentInfo} />;
-    case "comment":
-      return <CommentRender comment={compoundStatementObject} parentInfo={parentInfo} />;
-    case "unknown":
-      return <UnknownRender unknown={compoundStatementObject} parentInfo={parentInfo} />;
-  }
-}
+  const handleKeyDown = createKeyDownHandler(mode, {
+    edit: {
+      insert: () => {
+        if (!props.node.value) {
+          console.log("ReturnStatementRender: Inserting unknown node as return value");
+          insertUnknownIntoField(props.node, "value", nodeMap, onEdit);
+        }
+      },
+    },
+  });
 
-function ElseClauseRender({ elseClause }: { elseClause: objects.ElseClause }): React.ReactNode {
-  return (
-    <>
-      {" "}
-      <span className="token-keyword">else</span>
-      {compoundStatementObjectRender(elseClause.body, childInfo(elseClause, "body"))}
-    </>
-  );
-}
-
-function ReturnStatementRender({
-  returnStmt,
-}: {
-  returnStmt: objects.ReturnStatement;
-  parentInfo: ParentInfoV2;
-}): React.ReactNode {
-  return (
-    <>
+  const content = (
+    <div tabIndex={0} onKeyDown={handleKeyDown}>
       <span className="token-keyword">return</span>
-      {returnStmt.value && (
+      {props.node.value && (
         <>
           {" "}
-          <NodeRender node={returnStmt.value} parentInfo={childInfo(returnStmt, "value")} />
+          <NodeRender
+            node={props.node.value}
+            parentInfo={childInfo(props.node, "value")}
+            display="inline"
+            callbacks={createOptionalFieldCallbacks(props.node, "value", nodeMap, onEdit)}
+          />
         </>
       )}
       {";"}
-    </>
+    </div>
+  );
+
+  return (
+    <Object {...props} display="inline">
+      {content}
+    </Object>
   );
 }
 
-function CallExpressionRender({
-  callExpr,
-  parentInfo,
-}: {
-  callExpr: objects.CallExpression;
-  parentInfo: ParentInfoV2;
-}): React.ReactNode {
-  return (
-    <>
+function CallExpressionRender(props: XRenderProps<objects.CallExpression>): React.ReactNode {
+  const { nodeMap, onEdit, requestFocus, mode, selectedNodeId } = useLineContext();
+
+  const handleKeyDown = createKeyDownHandler(mode, {
+    edit: {
+      insert: () => {
+        if (selectedNodeId === props.node.id) {
+          console.log("CallExpressionRender: Appending argument");
+          appendToArray(props.node, "argumentList", createUnknown, nodeMap, onEdit, requestFocus);
+        }
+      },
+    },
+  });
+
+  const content = (
+    <span onKeyDown={handleKeyDown}>
       {EditableField({
-        node: callExpr,
+        node: props.node,
         key: "identifier",
-        parentInfo,
+        parentInfo: props.parentInfo,
         className: "token-function",
       })}
       <span className="token-delimiter">{"("}</span>
-      {callExpr.argumentList.map((arg, i) => (
+      {props.node.argumentList.map((arg, i) => (
         <React.Fragment key={arg.id}>
           {i > 0 && ", "}
-          <NodeRender node={arg} parentInfo={childInfo(callExpr, "argumentList", i)} />
+          <NodeRender
+            node={arg}
+            parentInfo={childInfo(props.node, "argumentList", i)}
+            display="inline"
+            callbacks={createArrayFieldCallbacks(
+              props.node,
+              "argumentList",
+              i,
+              createUnknown,
+              nodeMap,
+              onEdit,
+              requestFocus
+            )}
+          />
         </React.Fragment>
       ))}
       <span className="token-delimiter">{")"}</span>
       {";"}
-    </>
+    </span>
   );
+
+  return <Object {...props}>{content}</Object>;
 }
 
-function ReferenceRender({
-  reference,
-}: {
-  reference: objects.Reference;
-  parentInfo: ParentInfoV2;
-}): React.ReactNode {
+function ReferenceRender(props: XRenderProps<objects.Reference>): React.ReactNode {
   const { nodeMap } = useLineContext();
-  const targetNode = nodeMap.get(reference.declarationId);
+  const targetNode = nodeMap.get(props.node.declarationId);
 
   if (!targetNode || !("identifier" in targetNode)) {
-    return <>{reference.declarationId}</>;
+    return <>{props.node.declarationId}</>;
   }
 
-  return <span className="token-variable">{String(targetNode.identifier)}</span>;
+  const content = <span className="token-variable">{String(targetNode.identifier)}</span>;
+
+  return <Object {...props}>{content}</Object>;
 }
 
-function AssignmentExpressionRender({
-  assignmentExpr,
-}: {
-  assignmentExpr: objects.AssignmentExpression;
-  parentInfo: ParentInfoV2;
-}): React.ReactNode {
-  const { nodeMap } = useLineContext();
-  const targetNode = nodeMap.get(assignmentExpr.idDeclaration);
+function AssignmentExpressionRender(
+  props: XRenderProps<objects.AssignmentExpression>
+): React.ReactNode {
+  const { nodeMap, onEdit, requestFocus } = useLineContext();
+  const targetNode = nodeMap.get(props.node.idDeclaration);
 
   if (!targetNode || !("identifier" in targetNode)) {
-    return <>{assignmentExpr.idDeclaration}</>;
+    return <>{props.node.idDeclaration}</>;
   }
 
-  return (
+  const content = (
     <>
       <span className="token-variable">{String(targetNode.identifier)}</span> {"="}{" "}
-      <NodeRender node={assignmentExpr.value} parentInfo={childInfo(assignmentExpr, "value")} />
+      <NodeRender
+        node={props.node.value}
+        parentInfo={childInfo(props.node, "value")}
+        display="inline"
+        callbacks={createRequiredFieldCallbacks(props.node, "value", nodeMap, onEdit, requestFocus)}
+      />
     </>
   );
+
+  return <Object {...props}>{content}</Object>;
 }
 
-function NumberLiteralRender({
-  literalExpr,
-  parentInfo,
-}: {
-  literalExpr: objects.NumberLiteral;
-  parentInfo: ParentInfoV2;
-}): React.ReactNode {
-  return (
+function NumberLiteralRender(props: XRenderProps<objects.NumberLiteral>): React.ReactNode {
+  const content = (
     <>
       {EditableField({
-        node: literalExpr,
+        node: props.node,
         key: "value",
-        parentInfo,
+        parentInfo: props.parentInfo,
         className: "token-number",
       })}
     </>
   );
+
+  return <Object {...props}>{content}</Object>;
 }
 
-function StringLiteralRender({
-  literalExpr,
-  parentInfo,
-}: {
-  literalExpr: objects.StringLiteral;
-  parentInfo: ParentInfoV2;
-}): React.ReactNode {
-  return (
+function StringLiteralRender(props: XRenderProps<objects.StringLiteral>): React.ReactNode {
+  const content = (
     <>
       <span className="token-string">{'"'}</span>
       {EditableField({
-        node: literalExpr,
+        node: props.node,
         key: "value",
-        parentInfo,
+        parentInfo: props.parentInfo,
         className: "token-string",
       })}
       <span className="token-string">{'"'}</span>
     </>
   );
+
+  return <Object {...props}>{content}</Object>;
 }
 
-function BinaryExpressionRender({
-  binaryExpression,
-  parentInfo,
-}: {
-  binaryExpression: objects.BinaryExpression;
-  parentInfo: ParentInfoV2;
-}): React.ReactNode {
-  return (
+function BinaryExpressionRender(props: XRenderProps<objects.BinaryExpression>): React.ReactNode {
+  const { nodeMap, onEdit, requestFocus } = useLineContext();
+
+  const content = (
     <>
-      <NodeRender node={binaryExpression.left} parentInfo={childInfo(binaryExpression, "left")} />{" "}
-      {EditableField({ node: binaryExpression, key: "operator", parentInfo })}{" "}
-      <NodeRender node={binaryExpression.right} parentInfo={childInfo(binaryExpression, "right")} />
+      <NodeRender
+        node={props.node.left}
+        parentInfo={childInfo(props.node, "left")}
+        display="inline"
+        callbacks={createRequiredFieldCallbacks(props.node, "left", nodeMap, onEdit, requestFocus)}
+      />{" "}
+      {EditableField({ node: props.node, key: "operator", parentInfo: props.parentInfo })}{" "}
+      <NodeRender
+        node={props.node.right}
+        parentInfo={childInfo(props.node, "right")}
+        display="inline"
+        callbacks={createRequiredFieldCallbacks(props.node, "right", nodeMap, onEdit, requestFocus)}
+      />
     </>
   );
+
+  return <Object {...props}>{content}</Object>;
 }
 
-function CommentRender({
-  comment,
-  parentInfo,
-}: {
-  comment: objects.Comment;
-  parentInfo: ParentInfoV2;
-}): React.ReactNode {
-  return (
+function CommentRender(props: XRenderProps<objects.Comment>): React.ReactNode {
+  const content = (
     <>
       <span className="token-comment">{"//"}</span>{" "}
-      {EditableField({ node: comment, key: "content", parentInfo, className: "token-comment" })}
+      {EditableField({
+        node: props.node,
+        key: "content",
+        parentInfo: props.parentInfo,
+        className: "token-comment",
+      })}
     </>
   );
+
+  return <Object {...props}>{content}</Object>;
 }

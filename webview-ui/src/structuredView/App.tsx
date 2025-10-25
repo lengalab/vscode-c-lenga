@@ -1,12 +1,13 @@
 import { useState, useEffect } from "react";
-import { NodeRender, Object, ModeIndicator } from "../components/line";
-import { childInfo } from "../components/childInfo";
+import { SourceFileRender } from "../components/line";
+import ModeIndicator from "../components/ModeIndicator";
 import { LineProvider } from "../components/lineContext";
 
 import { vscode } from "../vscode";
 import * as objects from "../../../src/language_objects/cNodes";
 import { DebugProvider } from "../components/debugContext";
 import { ParentInfoV2 } from "../components/context";
+import DebugMenu from "../components/DebugMenu";
 
 export default function App() {
   const [sourceFile, setSourceFile] = useState<objects.SourceFile | undefined>(undefined);
@@ -75,26 +76,11 @@ export default function App() {
             setParentNodeInfo={setParentNodeInfo}
           >
             <ModeIndicator />
-            <div style={{ display: "flex", flexDirection: "column", gap: "1rem" }}>
-              {sourceFile?.code.map((node, i) => (
-                <Object key={node.id} node={node}>
-                  <NodeRender node={node} parentInfo={childInfo(sourceFile, "code", i)} />
-                </Object>
-              ))}
-            </div>
+            <SourceFileRender node={sourceFile} />
+            <DebugMenu />
           </LineProvider>
         ) : (
           <p>loading...</p>
-        )}
-        {debug && (
-          <div>
-            <h1>Debug Info</h1>
-            <p>selectedNodeId: {selectedNodeId}</p>
-            <p>selectedKey: {selectedKey}</p>
-            <p>parentNodeId: {parentNodeInfo?.parent.id}</p>
-            <p>parentKey: {parentNodeInfo?.key}</p>
-            <p>parentIndex: {parentNodeInfo?.index}</p>
-          </div>
         )}
       </DebugProvider>
     </>
